@@ -1,0 +1,172 @@
+1. Выведите название самолетов, которые имеют менее 50 посадочных мест?
+
+select a.model
+from aircrafts a 
+left join (select s.aircraft_code, count(s.seat_no)
+			from seats s
+			group by 1) q on a.aircraft_code = q.aircraft_code
+where q.count < 50
+
+2. Выведите процентное изменение ежемесячной суммы бронирования билетов, округленной до сотых.
+
+select 
+	q.sum as "Ежемесячная сумма бронирования",
+	round(q.sum * 100/lag(q.sum) over()-100,2) as "Процентное изменение",
+	q.date as "Дата"
+from(select
+		sum(b.total_amount),
+		date_trunc('month',b.book_date::date) as date
+	from bookings b
+	group by 2
+	order by 2) q
+
+3. Выведите названия самолетов не имеющих бизнес - класс. Решение должно быть через функцию array_agg.
+
+select a.model 
+from aircrafts a 
+left join(select s.aircraft_code ,array_agg(s.fare_conditions) as class
+		from seats s
+		group by 1) as q on a.aircraft_code = q.aircraft_code
+where 'Business' != all(q.class)
+
+4. Вывести накопительный итог количества мест в самолетах по каждому аэропорту на каждый день, учитывая только те самолеты, которые летали пустыми и только те дни, где из одного аэропорта таких самолетов вылетало более одного.
+ В результате должны быть код аэропорта, дата, количество пустых мест в самолете и накопительный итог.
+
+--explain (analyze, buffers, format json)
+select
+q.flight_id,
+q.model,
+q.departure_airport, 
+q.actual_departure::date, 
+q.seats, 
+sum(q.seats) over( partition by q.actual_departure::date ,q.departure_airport order by q.flight_id)
+from(
+select -- выбрали где из одного аэропорта пустых самолетов вылетало более одного
+	f.actual_departure::date,
+	f.departure_airport,
+	f.flight_id, 
+	f.seat_no ,
+	z.count as seats,
+	a.model,
+	f.count
+	from (select --выбрали пустые самолеты
+		bp.seat_no,
+		f.flight_id,
+		f.aircraft_code,
+		f.actual_departure::date,
+		f.departure_airport, 
+		count(f.flight_id) over (partition by f.actual_departure::date,f.departure_airport order by f.actual_departure::date) as count
+		from flights f
+		left join boarding_passes bp on f.flight_id = bp.flight_id
+		where bp.seat_no is null and f.actual_departure is not null) as f
+	left join aircrafts a  on a.aircraft_code = f.aircraft_code
+	left join (select
+					count(s.seat_no),
+					s.aircraft_code
+				from seats s
+				group by 2) as z on z.aircraft_code = a.aircraft_code
+	where f.count > 1
+	order by f.actual_departure::date, f.departure_airport) as q
+
+5. Найдите процентное соотношение перелетов по маршрутам от общего количества перелетов.
+ Выведите в результат названия аэропортов и процентное отношение.
+ Решение должно быть через оконную функцию.
+
+select
+	f.flight_no,
+	a.airport_name as "From",
+	q.airport_name as "To",
+	COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() AS percentage 
+from flights f
+left join airports a on a.airport_code = f.departure_airport
+left join (select
+			a.airport_code,
+			a.airport_name 
+		from airports a) as q on f.arrival_airport = q.airport_code
+group by 1,2,3
+
+6.Выведите количество пассажиров по каждому коду сотового оператора, если учесть, что код оператора - это три символа после +7
+
+--explain (analyze,buffers, format json)
+select q.number, count(q.number)	
+from(select 
+		substring(t.contact_data ->> 'phone':: text, 3,3) as number
+	from tickets t) as q
+group by q.number
+
+7. Классифицируйте финансовые обороты (сумма стоимости перелетов) по маршрутам:
+ До 50 млн - low
+ От 50 млн включительно до 150 млн - middle
+ От 150 млн включительно - high
+ Выведите в результат количество маршрутов в каждом полученном классе
+
+select	q.class,count(q.class)
+from(select 
+		f.flight_no,
+		case 
+			when sum(tf.amount) < 50000000 then 'low'
+			when sum(tf.amount) between 50000000 and 150000000 then 'middle'
+			when sum(tf.amount) > 150000000 then 'high'
+		end as class
+	from flights f 
+	left join ticket_flights tf on f.flight_id = tf.flight_id 
+	group by 1) as q
+group by 1
+having q.class is not null 
+
+8. Вычислите медиану стоимости перелетов, медиану размера бронирования и отношение медианы бронирования к медиане стоимости перелетов, округленной до сотых
+
+with cte1 as(
+	select	1 as number, q.amount
+	from(select
+			tf.amount,
+			row_number () over (order by tf.amount) as rn,
+			count(*) over() as count
+		from ticket_flights tf) as q
+	where rn = q.count/2
+),
+cte2 as(
+	select 1 as number, q.total_amount
+	from(select
+			b.total_amount,
+			row_number () over (order by b.total_amount) as rn,
+			count(*) over() as count
+		from bookings b) as q
+	where rn = q.count/2
+)
+select cte1.amount, cte2.total_amount, round(cte2.total_amount/cte1.amount,2)
+from cte1
+left join cte2 on cte1.number = cte2.number
+
+9. Найдите значение минимальной стоимости полета 1 км для пассажиров. То есть нужно найти расстояние между аэропортами и с учетом стоимости перелетов получить искомый результат
+  Для поиска расстояния между двумя точками на поверхности Земли используется модуль earthdistance.
+  Для работы модуля earthdistance необходимо предварительно установить модуль cube.
+  Установка модулей происходит через команду: create extension название_модуля.
+
+with cte1 as(
+	select f.flight_id as rn, a.airport_code, a.longitude, a.latitude
+	from airports a 
+	left join flights f on a.airport_code = f.departure_airport
+),
+cte2 as(
+	select f.flight_id as rn, a.airport_code, a.longitude, a.latitude
+	from airports a 
+	left join flights f on a.airport_code = f.arrival_airport
+),
+cte3 as(
+select
+	a.airport_code as start, 
+	b.airport_code as end, 
+	earth_distance(ll_to_earth(a.latitude, a.longitude),ll_to_earth(b.latitude, b.longitude))/1000 as dist,
+	q.amount / (earth_distance(ll_to_earth(a.latitude, a.longitude),ll_to_earth(b.latitude, b.longitude))/1000) as min
+from cte1 as a
+join cte2 as b on a.rn = b.rn
+join (select sum(tf.amount) as amount, tf.flight_id
+	from ticket_flights tf 
+	group by 2) as q on q.flight_id = b.rn
+)
+select q.start, q.end, q.min
+from cte3 as q
+where q.min = (select min(min)
+				from cte3)
+group by 1,2,3
